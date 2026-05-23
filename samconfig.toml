@@ -1,0 +1,21 @@
+version = 0.1
+
+[default.global.parameters]
+stack_name = "ncit-demo"
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+s3_prefix = "ncit-demo"
+region = "ap-south-1"
+profile = "personal"
+confirm_changeset = false
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+fail_on_empty_changeset = false
+resolve_s3 = true
+parameter_overrides = "ProjectName=\"ncit-demo\""
+
+[default.sync.parameters]
+watch = true

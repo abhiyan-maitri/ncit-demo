@@ -1,0 +1,11 @@
+{
+  "Records": [
+    {
+      "messageId": "demo-1",
+      "receiptHandle": "demo",
+      "body": "{\"Records\":[{\"s3\":{\"bucket\":{\"name\":\"ncit-demo-csv-000000000000\"},\"object\":{\"key\":\"raw/sample.csv\"}}}]}",
+      "eventSource": "aws:sqs",
+      "awsRegion": "us-east-1"
+    }
+  ]
+}

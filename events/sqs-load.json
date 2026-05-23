@@ -1,0 +1,9 @@
+{
+  "Records": [
+    { "messageId": "m-1", "receiptHandle": "r1", "body": "{\"n\":1}",  "attributes": { "ApproximateReceiveCount": "1" }, "eventSource": "aws:sqs", "awsRegion": "ap-south-1" },
+    { "messageId": "m-2", "receiptHandle": "r2", "body": "{\"n\":2}",  "attributes": { "ApproximateReceiveCount": "1" }, "eventSource": "aws:sqs", "awsRegion": "ap-south-1" },
+    { "messageId": "m-3", "receiptHandle": "r3", "body": "{\"n\":10}", "attributes": { "ApproximateReceiveCount": "1" }, "eventSource": "aws:sqs", "awsRegion": "ap-south-1" },
+    { "messageId": "m-4", "receiptHandle": "r4", "body": "{\"n\":11}", "attributes": { "ApproximateReceiveCount": "2" }, "eventSource": "aws:sqs", "awsRegion": "ap-south-1" },
+    { "messageId": "m-5", "receiptHandle": "r5", "body": "{\"n\":20}", "attributes": { "ApproximateReceiveCount": "3" }, "eventSource": "aws:sqs", "awsRegion": "ap-south-1" }
+  ]
+}

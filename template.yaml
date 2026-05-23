@@ -1,0 +1,438 @@
+# =====================================================================
+#  NCIT Demo  ·  Serverless on AWS workshop  ·  TypeScript
+#
+#  Four scenarios in one SAM template:
+#    1. Simple REST API          (API Gateway + Lambda + DynamoDB)
+#    2. Analyze S3 CSV data      (S3 → SQS + DLQ → Lambda → S3)
+#    3. OCR an image             (S3 → SQS + DLQ → Lambda [tesseract.js] → S3)
+#    4. Scaling & retries demo   (Producer Lambda → SQS + DLQ → Consumer
+#                                 Lambda with ReportBatchItemFailures)
+#
+#  Day-to-day commands (see package.json):
+#    npm run validate
+#    npm run build
+#    npm run deploy
+#    npm run start              — sam local start-api  (Scenario 1)
+#    npm run load:fire          — fire 10,000 messages at the demo queue
+#    npm run logs:load-consumer — tail the consumer's logs in real time
+# =====================================================================
+
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: NCIT Demo — students API, CSV analyzer, image OCR, scaling demo
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: ncit-demo
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Timeout: 30
+    MemorySize: 256
+    Architectures: [x86_64]
+    Tracing: Active
+    LoggingConfig:
+      LogFormat: JSON
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO
+
+Resources:
+
+  # ===================================================================
+  #  SCENARIO 1  ·  Simple REST API
+  # ===================================================================
+
+  StudentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${ProjectName}-students
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+
+  StudentsApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Name: !Sub ${ProjectName}-students-api
+      CorsConfiguration:
+        AllowOrigins: ['*']
+        AllowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS']
+        AllowHeaders: ['*']
+
+  StudentsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-students-api
+      CodeUri: .
+      Handler: functions/students_api.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref StudentsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref StudentsTable
+      Events:
+        CreateStudent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudentsApi
+            Method: POST
+            Path: /students
+        ListStudents:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudentsApi
+            Method: GET
+            Path: /students
+        GetStudent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudentsApi
+            Method: GET
+            Path: /students/{id}
+        DeleteStudent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StudentsApi
+            Method: DELETE
+            Path: /students/{id}
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        Format: cjs
+        EntryPoints: [functions/students_api.ts]
+        External: ["@aws-sdk/*", "aws-sdk"]
+
+  # ===================================================================
+  #  SCENARIO 2  ·  Analyze S3 CSV data
+  # ===================================================================
+
+  CsvDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-csv-dlq
+      MessageRetentionPeriod: 1209600
+
+  CsvQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-csv-queue
+      VisibilityTimeout: 180
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt CsvDlq.Arn
+        maxReceiveCount: 3
+
+  CsvQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref CsvQueue]
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt CsvQueue.Arn
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Sub arn:aws:s3:::${ProjectName}-csv-${AWS::AccountId}
+
+  CsvBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: CsvQueuePolicy
+    Properties:
+      BucketName: !Sub ${ProjectName}-csv-${AWS::AccountId}
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectCreated:*
+            Queue: !GetAtt CsvQueue.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: raw/
+                  - Name: suffix
+                    Value: .csv
+
+  CsvProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-csv-processor
+      CodeUri: .
+      Handler: functions/csv_processor.handler
+      Timeout: 120
+      MemorySize: 512
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref CsvBucket
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Sub ${ProjectName}-csv-${AWS::AccountId}
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt CsvQueue.Arn
+            BatchSize: 1
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        Format: cjs
+        EntryPoints: [functions/csv_processor.ts]
+        External: ["@aws-sdk/*", "aws-sdk"]
+
+  # ===================================================================
+  #  SCENARIO 3  ·  OCR pipeline (fan-out architecture)
+  #
+  #     S3 incoming/* ──► OcrQueue ──► Splitter ──► OcrPageQueue
+  #                       (+OcrDlq)   (1 Lambda)   (+OcrPageDlq)
+  #                                                      │
+  #                                                      ▼ ESM, batch 1
+  #                                                  PageWorker
+  #                                              (N concurrent Lambdas,
+  #                                               one per PDF page or
+  #                                               one per image)
+  #                                                      │
+  #                                                      ▼
+  #                                              extracted/<name>/
+  #                                                page-0001.txt
+  #                                                page-0002.txt …
+  # ===================================================================
+
+  # --- Front queue: S3 events go here ---
+  OcrDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-ocr-dlq
+      MessageRetentionPeriod: 1209600
+
+  OcrQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-ocr-queue
+      VisibilityTimeout: 120
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OcrDlq.Arn
+        maxReceiveCount: 3
+
+  OcrQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref OcrQueue]
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt OcrQueue.Arn
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Sub arn:aws:s3:::${ProjectName}-pdf-${AWS::AccountId}
+
+  PdfBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: OcrQueuePolicy
+    Properties:
+      BucketName: !Sub ${ProjectName}-pdf-${AWS::AccountId}
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectCreated:*
+            Queue: !GetAtt OcrQueue.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: incoming/
+
+  # --- Page queue: one message per PDF page / image ---
+  OcrPageDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-ocr-page-dlq
+      MessageRetentionPeriod: 1209600
+
+  OcrPageQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-ocr-page-queue
+      VisibilityTimeout: 300
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OcrPageDlq.Arn
+        maxReceiveCount: 3
+
+  # --- Stage 1: Splitter ---
+  OcrSplitterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-ocr-splitter
+      CodeUri: functions/ocr_splitter/
+      Handler: app.handler
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          PAGE_QUEUE_URL: !Ref OcrPageQueue
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Sub ${ProjectName}-pdf-${AWS::AccountId}
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt OcrPageQueue.QueueName
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OcrQueue.Arn
+            BatchSize: 1
+
+  # --- Stage 2: Page worker (fan-out target) ---
+  OcrPageWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-ocr-page-worker
+      CodeUri: functions/ocr_page_worker/
+      Handler: app.handler
+      Timeout: 300
+      MemorySize: 2048
+      EphemeralStorage:
+        Size: 1024            # tesseract caches eng.traineddata to /tmp
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref PdfBucket
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Sub ${ProjectName}-pdf-${AWS::AccountId}
+      Events:
+        FromPageQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OcrPageQueue.Arn
+            BatchSize: 1
+
+  # ===================================================================
+  #  SCENARIO 4  ·  Scaling & retry demo  (the show-and-tell scenario)
+  #
+  #  LoadProducer Lambda → SendMessageBatch in parallel → LoadQueue
+  #                                                          ↓ ESM (batch 10)
+  #                                                  LoadConsumer Lambda
+  #                                                  (ReservedConcurrency=5
+  #                                                   ReportBatchItemFailures)
+  #                                                          ↓ on 3 retries
+  #                                                       LoadDlq
+  #
+  #  LoadConsumer fails every message where n % 10 === 0 on purpose.
+  #  Those messages retry → exhaust maxReceiveCount → land in LoadDlq.
+  #  CloudWatch shows: ConcurrentExecutions pinned at 5, queue depth
+  #  rising then draining, DLQ depth climbing to ~count/10.
+  # ===================================================================
+
+  LoadDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-load-dlq
+      MessageRetentionPeriod: 1209600
+
+  LoadQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-load-queue
+      VisibilityTimeout: 60
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt LoadDlq.Arn
+        maxReceiveCount: 3
+
+  LoadProducerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-load-producer
+      CodeUri: .
+      Handler: functions/load_producer.handler
+      Timeout: 600
+      MemorySize: 512
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref LoadQueue
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt LoadQueue.QueueName
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        Format: cjs
+        EntryPoints: [functions/load_producer.ts]
+        External: ["@aws-sdk/*", "aws-sdk"]
+
+  LoadConsumerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-load-consumer
+      CodeUri: .
+      Handler: functions/load_consumer.handler
+      Timeout: 30
+      MemorySize: 256
+      # No ReservedConcurrentExecutions here.  This new AWS account's
+      # total Lambda concurrency cap is 10 (below the documented 1000
+      # default), so the account quota itself becomes the visible
+      # throttle.  Watch CloudWatch metric 'Throttles' on the load queue.
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt LoadQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures   # ← partial-batch failure mode
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        Format: cjs
+        EntryPoints: [functions/load_consumer.ts]
+        External: ["@aws-sdk/*", "aws-sdk"]
+
+Outputs:
+  StudentsApiUrl:
+    Description: HTTP API base URL for the students service
+    Value: !Sub https://${StudentsApi}.execute-api.${AWS::Region}.amazonaws.com/
+  StudentsTableName:
+    Value: !Ref StudentsTable
+  CsvBucketName:
+    Value: !Ref CsvBucket
+  CsvDlqName:
+    Value: !GetAtt CsvDlq.QueueName
+  PdfBucketName:
+    Value: !Ref PdfBucket
+  OcrDlqName:
+    Value: !GetAtt OcrDlq.QueueName
+  OcrPageQueueName:
+    Description: Per-page work queue (fan-out target from the splitter)
+    Value: !GetAtt OcrPageQueue.QueueName
+  OcrPageDlqName:
+    Description: Failed per-page work lands here
+    Value: !GetAtt OcrPageDlq.QueueName
+  LoadProducerName:
+    Description: Invoke this to fire N messages at the demo queue
+    Value: !Ref LoadProducerFunction
+  LoadQueueName:
+    Value: !GetAtt LoadQueue.QueueName
+  LoadDlqName:
+    Description: Failed (n % 10 == 0) messages land here after 3 retries
+    Value: !GetAtt LoadDlq.QueueName
