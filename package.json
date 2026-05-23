@@ -1,42 +1,17 @@
 {
     "name": "ncit-demo",
-    "version": "1.0.0",
-    "description": "NCIT workshop — Serverless on AWS (students API, CSV analyzer, image OCR, scaling demo)",
+    "version": "0.0.1",
+    "description": "NCIT workshop — Serverless on AWS (starter)",
     "scripts": {
-        "validate": "sam validate --lint",
-        "build": "sam build",
-        "deploy": "sam deploy",
+        "validate":      "sam validate --lint",
+        "build":         "sam build",
+        "deploy":        "sam deploy",
         "deploy:guided": "sam deploy --guided",
-        "start": "sam local start-api",
-        "start:lambda": "sam local start-lambda",
-
-        "invoke:create-student": "sam local invoke StudentsFunction -e events/api-create-student.json",
-        "invoke:list-students":  "sam local invoke StudentsFunction -e events/api-list-students.json",
-        "invoke:csv":            "sam local invoke CsvProcessorFunction -e events/sqs-csv.json",
-        "invoke:load-consumer":  "sam local invoke LoadConsumerFunction -e events/sqs-load.json",
-
-        "load:fire":     "aws --profile personal lambda invoke --function-name ncit-demo-load-producer --payload '{\"count\":10000}'  --cli-binary-format raw-in-base64-out /tmp/load.json && cat /tmp/load.json",
-        "load:fire:big": "aws --profile personal lambda invoke --function-name ncit-demo-load-producer --payload '{\"count\":100000}' --cli-binary-format raw-in-base64-out /tmp/load.json && cat /tmp/load.json",
-
-        "queue:depth":     "aws --profile personal sqs get-queue-attributes --queue-url $(aws --profile personal sqs get-queue-url --queue-name ncit-demo-load-queue --query QueueUrl --output text) --attribute-names ApproximateNumberOfMessages",
-        "queue:dlq-depth": "aws --profile personal sqs get-queue-attributes --queue-url $(aws --profile personal sqs get-queue-url --queue-name ncit-demo-load-dlq   --query QueueUrl --output text) --attribute-names ApproximateNumberOfMessages",
-        "queue:purge":     "aws --profile personal sqs purge-queue --queue-url $(aws --profile personal sqs get-queue-url --queue-name ncit-demo-load-queue --query QueueUrl --output text)",
-        "queue:purge-dlq": "aws --profile personal sqs purge-queue --queue-url $(aws --profile personal sqs get-queue-url --queue-name ncit-demo-load-dlq   --query QueueUrl --output text)",
-
-        "logs:api":            "sam logs --stack-name ncit-demo --name StudentsFunction      --tail",
-        "logs:csv":            "sam logs --stack-name ncit-demo --name CsvProcessorFunction  --tail",
-        "logs:ocr-splitter":   "sam logs --stack-name ncit-demo --name OcrSplitterFunction   --tail",
-        "logs:ocr-page":       "sam logs --stack-name ncit-demo --name OcrPageWorkerFunction --tail",
-        "logs:load-producer":  "sam logs --stack-name ncit-demo --name LoadProducerFunction  --tail",
-        "logs:load-consumer":  "sam logs --stack-name ncit-demo --name LoadConsumerFunction  --tail",
-
-        "destroy": "sam delete --no-prompts"
-    },
-    "dependencies": {
-        "@aws-sdk/client-dynamodb": "^3.600.0",
-        "@aws-sdk/client-s3": "^3.600.0",
-        "@aws-sdk/client-sqs": "^3.600.0",
-        "@aws-sdk/lib-dynamodb": "^3.600.0"
+        "start":         "sam local start-api",
+        "start:lambda":  "sam local start-lambda",
+        "invoke:hello":  "sam local invoke HelloFunction -e events/api-hello.json",
+        "logs:hello":    "sam logs --stack-name ncit-demo --name HelloFunction --tail",
+        "destroy":       "sam delete --no-prompts"
     },
     "devDependencies": {
         "@types/aws-lambda": "^8.10.140",

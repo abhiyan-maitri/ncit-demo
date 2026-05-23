@@ -10,8 +10,8 @@ parallel = true
 [default.deploy.parameters]
 s3_prefix = "ncit-demo"
 region = "ap-south-1"
-profile = "personal"
-confirm_changeset = false
+# profile = "your-profile-name"     # uncomment & set, or pass --profile on the CLI
+confirm_changeset = true
 capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
 fail_on_empty_changeset = false
 resolve_s3 = true

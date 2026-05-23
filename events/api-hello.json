@@ -1,18 +1,18 @@
 {
   "version": "2.0",
-  "routeKey": "GET /students",
-  "rawPath": "/students",
+  "routeKey": "GET /hello",
+  "rawPath": "/hello",
   "rawQueryString": "",
   "headers": { "accept": "application/json" },
   "requestContext": {
     "http": {
       "method": "GET",
-      "path": "/students",
+      "path": "/hello",
       "protocol": "HTTP/1.1",
       "sourceIp": "127.0.0.1",
       "userAgent": "sam-local"
     },
-    "routeKey": "GET /students",
+    "routeKey": "GET /hello",
     "stage": "$default"
   },
   "isBase64Encoded": false
